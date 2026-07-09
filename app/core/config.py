@@ -1,0 +1,56 @@
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    app_env: str = "development"
+    log_level: str = "INFO"
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+
+    database_url: str = "postgresql+asyncpg://sanrachna:sanrachna_secret@localhost:5432/sanrachna"
+    database_url_sync: str = "postgresql://sanrachna:sanrachna_secret@localhost:5432/sanrachna"
+
+    redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/1"
+
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "sanrachna_chunks"
+
+    sarvam_api_key: str = ""
+    sarvam_cost_per_page_inr: float = 0.5
+    # auto = smart route local/sarvam/mineru | local | sarvam | mineru
+    digitization_provider: str = "auto"
+    mineru_enabled: bool = False
+    mineru_bin: str = "mineru"
+    mineru_backend: str = "pipeline"
+    mineru_timeout_sec: int = 600
+    auto_translate_queries: bool = True
+
+    litellm_base_url: str = "http://localhost:4000"
+    litellm_api_key: str = "sk-sanrachna-master"
+    litellm_embedding_model: str = "text-embedding-3-small"
+    litellm_chat_model: str = "gpt-4o-mini"
+
+    upload_dir: str = "./data/uploads"
+    output_dir: str = "./data/outputs"
+
+    chunk_size: int = 512
+    chunk_overlap: int = 64
+    child_chunk_size: int = 512
+    parent_chunk_size: int = 2048
+    sarvam_max_pages: int = 10
+    enable_rerank: bool = True
+    enable_cohere_rerank: bool = False
+    rerank_model: str = "rerank-v3.5"
+    rerank_top_n: int = 20
+    cohere_api_key: str = ""
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

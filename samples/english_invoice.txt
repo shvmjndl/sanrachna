@@ -1,0 +1,29 @@
+# Sample English document for testing without Sarvam.
+# Upload this via Streamlit or: curl -F "file=@samples/english_invoice.txt" -F "language=en-IN" ...
+
+INVOICE #INV-2025-0042
+Date: March 15, 2025
+Vendor: Acme Technology Pvt Ltd
+GSTIN: 27AABCU9603R1ZM
+PAN: ABCDE1234F
+
+Bill To:
+Global Enterprises Inc.
+123 Business Park, Mumbai 400001
+
+| Description          | Qty | Rate (INR) | Amount (INR) |
+|----------------------|-----|------------|--------------|
+| Cloud Hosting Q1     | 1   | 45,000     | 45,000       |
+| Support Services     | 3   | 5,000      | 15,000       |
+| SSL Certificate      | 2   | 2,500      | 5,000        |
+
+Subtotal: Rs. 65,000
+GST (18%): Rs. 11,700
+Total Due: Rs. 76,700
+
+Payment Terms: Net 30 days
+Due Date: April 14, 2025
+Bank: HDFC Bank, IFSC: HDFC0001234
+
+Signed by: Rajesh Kumar, CFO
+Acme Technology Pvt Ltd

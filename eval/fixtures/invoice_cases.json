@@ -1,0 +1,12 @@
+[
+  {
+    "query": "What is the total due including GST?",
+    "expected_contains": ["76,700", "76700"],
+    "expected_not_contains": ["couldn't find"]
+  },
+  {
+    "query": "Who is the vendor?",
+    "expected_contains": ["Acme"],
+    "expected_not_contains": []
+  }
+]
