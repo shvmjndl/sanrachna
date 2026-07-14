@@ -19,7 +19,7 @@ log = get_logger(__name__)
 
 @router.post("/search", response_model=SearchResponse)
 async def search_documents(req: SearchRequest):
-    cost_tracker = CostTracker(SyncSessionLocal, log)
+    cost_tracker = CostTracker(SyncSessionLocal, log, buffer_writes=False)
     llm = LLMService(settings, cost_tracker)
     indexer = HybridIndexer(settings, llm, SyncSessionLocal, cost_tracker)
     graph_svc = GraphService(SyncSessionLocal)

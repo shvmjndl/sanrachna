@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -80,7 +81,7 @@ Text:
 {text[:3000]}"""
 
     try:
-        response, usage = await llm.chat(
+        response, _ = await llm.chat(
             messages=[{"role": "user", "content": prompt}],
             operation="entity_extraction",
             job_id=job_id,
@@ -115,15 +116,42 @@ async def extract_entities(
     use_llm: bool = True,
     job_id: str | None = None,
     document_id: str | None = None,
+    *,
+    concurrency: int = 1,
 ) -> list[Entity]:
+    """Extract entities with one LLM call per chunk (unchanged prompts for accuracy)."""
     all_entities: list[Entity] = []
+    llm_chunks = []
+
     for chunk in chunks:
         all_entities.extend(extract_regex_entities(chunk.text, chunk.id))
         if use_llm and len(chunk.text) > 50:
-            llm_entities = await extract_llm_entities(
-                llm, chunk.text, language, chunk.id, job_id, document_id
+            llm_chunks.append(chunk)
+
+    if not llm_chunks:
+        return _dedupe(all_entities)
+
+    workers = max(1, min(concurrency, len(llm_chunks)))
+    if workers == 1:
+        for chunk in llm_chunks:
+            all_entities.extend(
+                await extract_llm_entities(
+                    llm, chunk.text, language, chunk.id, job_id=job_id, document_id=document_id
+                )
             )
-            all_entities.extend(llm_entities)
+        return _dedupe(all_entities)
+
+    sem = asyncio.Semaphore(workers)
+
+    async def one(chunk) -> list[Entity]:
+        async with sem:
+            return await extract_llm_entities(
+                llm, chunk.text, language, chunk.id, job_id=job_id, document_id=document_id
+            )
+
+    for result in await asyncio.gather(*[one(chunk) for chunk in llm_chunks]):
+        all_entities.extend(result)
+
     return _dedupe(all_entities)
 
 

@@ -34,11 +34,13 @@ class CostLog(SyncBase):
 
 
 class CostTracker:
-    """Records per-operation costs to DB and structured logs."""
+    """Records per-operation costs; buffers writes and flushes per document by default."""
 
-    def __init__(self, session_factory, logger):
+    def __init__(self, session_factory, logger, *, buffer_writes: bool = True):
         self._session_factory = session_factory
         self._log = logger
+        self._buffer_writes = buffer_writes
+        self._pending: list[dict[str, Any]] = []
 
     def log_sarvam(
         self,
@@ -51,7 +53,7 @@ class CostTracker:
         extra: dict | None = None,
     ) -> float:
         cost_inr = pages * cost_per_page
-        self._persist(
+        self._record(
             job_id=job_id,
             document_id=document_id,
             service="sarvam",
@@ -82,7 +84,7 @@ class CostTracker:
         cost_usd: float | None = None,
         extra: dict | None = None,
     ) -> None:
-        self._persist(
+        self._record(
             job_id=job_id,
             document_id=document_id,
             service="litellm",
@@ -104,21 +106,55 @@ class CostTracker:
             cost_usd=cost_usd,
         )
 
-    def _persist(self, **kwargs) -> None:
+    def flush(self) -> int:
+        """Persist buffered cost rows in a single transaction."""
+        if not self._pending:
+            return 0
+        batch = self._pending
+        self._pending = []
+        with self._session_factory() as session:
+            for kwargs in batch:
+                meta = kwargs.pop("metadata", None)
+                session.add(
+                    CostLog(
+                        job_id=kwargs.get("job_id"),
+                        document_id=kwargs.get("document_id"),
+                        service=kwargs["service"],
+                        operation=kwargs["operation"],
+                        model=kwargs.get("model"),
+                        input_tokens=kwargs.get("input_tokens"),
+                        output_tokens=kwargs.get("output_tokens"),
+                        pages=kwargs.get("pages"),
+                        cost_inr=kwargs.get("cost_inr"),
+                        cost_usd=kwargs.get("cost_usd"),
+                        metadata_=meta,
+                    )
+                )
+            session.commit()
+        return len(batch)
+
+    def _record(self, **kwargs) -> None:
+        if self._buffer_writes:
+            self._pending.append(kwargs.copy())
+            return
+        self._persist_one(kwargs)
+
+    def _persist_one(self, kwargs: dict[str, Any]) -> None:
         meta = kwargs.pop("metadata", None)
         with self._session_factory() as session:
-            entry = CostLog(
-                job_id=kwargs.get("job_id"),
-                document_id=kwargs.get("document_id"),
-                service=kwargs["service"],
-                operation=kwargs["operation"],
-                model=kwargs.get("model"),
-                input_tokens=kwargs.get("input_tokens"),
-                output_tokens=kwargs.get("output_tokens"),
-                pages=kwargs.get("pages"),
-                cost_inr=kwargs.get("cost_inr"),
-                cost_usd=kwargs.get("cost_usd"),
-                metadata_=meta,
+            session.add(
+                CostLog(
+                    job_id=kwargs.get("job_id"),
+                    document_id=kwargs.get("document_id"),
+                    service=kwargs["service"],
+                    operation=kwargs["operation"],
+                    model=kwargs.get("model"),
+                    input_tokens=kwargs.get("input_tokens"),
+                    output_tokens=kwargs.get("output_tokens"),
+                    pages=kwargs.get("pages"),
+                    cost_inr=kwargs.get("cost_inr"),
+                    cost_usd=kwargs.get("cost_usd"),
+                    metadata_=meta,
+                )
             )
-            session.add(entry)
             session.commit()

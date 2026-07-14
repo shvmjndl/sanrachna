@@ -26,7 +26,7 @@ async def extract_fields(req: ExtractRequest):
     if not req.fields:
         raise HTTPException(status_code=400, detail="Provide fields or template_id")
 
-    cost_tracker = CostTracker(SyncSessionLocal, log)
+    cost_tracker = CostTracker(SyncSessionLocal, log, buffer_writes=False)
     llm = LLMService(settings, cost_tracker)
     indexer = HybridIndexer(settings, llm, SyncSessionLocal, cost_tracker)
     extractor = SchemaExtractor(llm, indexer, SyncSessionLocal)

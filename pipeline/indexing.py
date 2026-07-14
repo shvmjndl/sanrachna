@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections import defaultdict
 
@@ -117,10 +118,21 @@ class HybridIndexer:
                 )
             )
 
-        self._client.upsert(collection_name=self._collection, points=points)
-
         if self._bm25:
-            self._bm25.index_chunks(chunks, document_id, corpus_id)
+            await asyncio.gather(
+                asyncio.to_thread(
+                    self._client.upsert,
+                    collection_name=self._collection,
+                    points=points,
+                ),
+                asyncio.to_thread(self._bm25.index_chunks, chunks, document_id, corpus_id),
+            )
+        else:
+            await asyncio.to_thread(
+                self._client.upsert,
+                collection_name=self._collection,
+                points=points,
+            )
 
         return len(points)
 
@@ -236,7 +248,11 @@ class HybridIndexer:
         if not texts:
             return []
         embeddings, _ = await self._llm.embed_batch(
-            texts, operation="chunk_embedding", job_id=job_id, document_id=document_id
+            texts,
+            operation="chunk_embedding",
+            job_id=job_id,
+            document_id=document_id,
+            batch_concurrency=self._settings.embed_batch_concurrency,
         )
         return embeddings
 

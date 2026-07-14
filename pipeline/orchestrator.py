@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from pathlib import Path
@@ -104,7 +105,15 @@ class PipelineOrchestrator:
 
         if file_type == "sarvam":
             markdown, structured, sarvam_job_ids, pages, detected_languages, digitizer_used = (
-                self._digitize_pdf_image(file_path, language, choice, options, job_id, document_id)
+                await asyncio.to_thread(
+                    self._digitize_pdf_image,
+                    file_path,
+                    language,
+                    choice,
+                    options,
+                    job_id,
+                    document_id,
+                )
             )
         elif file_type == "convert":
             digitizer_used = "local"
@@ -150,22 +159,42 @@ class PipelineOrchestrator:
         entities = []
         if options.get("enable_entities", True):
             entities = await extract_entities(
-                self._llm, indexable, language, job_id=job_id, document_id=document_id
+                self._llm,
+                indexable,
+                language,
+                job_id=job_id,
+                document_id=document_id,
+                concurrency=self._settings.entity_extraction_concurrency,
             )
             if self._entity_resolver:
                 entities = self._entity_resolver.resolve(entities, document_id, corpus_id)
 
         relationships = []
         graph = None
-        if options.get("enable_graph", True) and entities:
-            relationships, graph = await extract_relationships(
-                self._llm, entities, markdown, job_id=job_id, document_id=document_id
-            )
+        captioned_images = images
 
-        if options.get("enable_captions", True) and images:
-            images = await caption_images(
-                self._llm, images, markdown[:1000], job_id=job_id, document_id=document_id
-            )
+        async def _graph_task():
+            if options.get("enable_graph", True) and entities:
+                return await extract_relationships(
+                    self._llm, entities, markdown, job_id=job_id, document_id=document_id
+                )
+            return [], None
+
+        async def _caption_task():
+            if options.get("enable_captions", True) and images:
+                return await caption_images(
+                    self._llm,
+                    images,
+                    markdown[:1000],
+                    job_id=job_id,
+                    document_id=document_id,
+                    concurrency=self._settings.image_caption_concurrency,
+                )
+            return images
+
+        graph_result, captioned_images = await asyncio.gather(_graph_task(), _caption_task())
+        relationships, graph = graph_result
+        images = captioned_images
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
@@ -212,9 +241,11 @@ class PipelineOrchestrator:
                 chunk_count=indexed,
             )
         ko.embeddings = embeddings_info
+        self._cost.flush()
         return ko
 
     async def aclose(self) -> None:
+        self._vision.close()
         await self._indexer.aclose()
 
     def _mineru_available(self) -> bool:

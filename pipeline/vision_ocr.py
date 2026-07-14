@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import fitz
@@ -12,6 +13,7 @@ import httpx
 from app.core.config import Settings
 from app.core.cost_tracker import CostTracker
 from app.core.logging import get_logger
+from pipeline.page_parallel import map_parallel
 from pipeline.provenance import normalize_structured
 
 log = get_logger(__name__)
@@ -22,6 +24,14 @@ DOCUMENT_OCR_PROMPT = (
     "Tables should use HTML format, formulas LaTeX, in reading order. "
     "Output only the extracted content."
 )
+
+
+@dataclass
+class _PageRender:
+    page_num: int
+    img_path: Path
+    width: float
+    height: float
 
 
 class VisionOCRDigitizer:
@@ -37,6 +47,9 @@ class VisionOCRDigitizer:
         self._max_pages = settings.vision_ocr_max_pages
         self._scale = settings.vision_ocr_render_scale
         self._timeout = settings.vision_ocr_timeout_sec
+        self._concurrency = settings.vision_ocr_concurrency
+        self._image_detail = settings.vision_ocr_image_detail
+        self._client = httpx.Client(timeout=self._timeout)
 
     @staticmethod
     def _resolve_models(settings: Settings) -> list[str]:
@@ -53,6 +66,9 @@ class VisionOCRDigitizer:
         if any(m.startswith("gemini") for m in self._models):
             return bool(self._settings.gemini_api_key)
         return True
+
+    def close(self) -> None:
+        self._client.close()
 
     def process_file(
         self,
@@ -92,29 +108,40 @@ class VisionOCRDigitizer:
         if page_count > limit:
             log.warning("vision_ocr_page_limit", total=page_count, limit=limit)
 
-        pages_md: list[str] = []
-        structured_pages: list[dict] = []
-
         with tempfile.TemporaryDirectory(prefix="sanrachna_vision_") as tmp:
             tmp_path = Path(tmp)
+            renders: list[_PageRender] = []
             for i in range(limit):
                 page_num = i + 1
                 pix = doc[i].get_pixmap(matrix=fitz.Matrix(self._scale, self._scale))
                 img_path = tmp_path / f"page_{page_num:04d}.png"
                 pix.save(str(img_path))
-                text = self._ocr_image(img_path, job_id=job_id, document_id=document_id)
-                pages_md.append(f"## Page {page_num}\n\n{text}".strip())
-                structured_pages.append(
-                    {
-                        "page_number": page_num,
-                        "width": float(pix.width),
-                        "height": float(pix.height),
-                        "blocks": [{"text": text}],
-                    }
+                renders.append(
+                    _PageRender(page_num=page_num, img_path=img_path, width=float(pix.width), height=float(pix.height))
                 )
-                log.info("vision_ocr_page_done", page=page_num, chars=len(text), model=self._model)
+            doc.close()
 
-        doc.close()
+            def ocr_page(render: _PageRender) -> tuple[int, str]:
+                text = self._ocr_image(render.img_path, job_id=job_id, document_id=document_id)
+                log.info("vision_ocr_page_done", page=render.page_num, chars=len(text), model=self._model)
+                return render.page_num, text
+
+            ocr_by_page = dict(map_parallel(renders, ocr_page, max_workers=self._concurrency))
+
+        pages_md: list[str] = []
+        structured_pages: list[dict] = []
+        for render in renders:
+            text = ocr_by_page[render.page_num]
+            pages_md.append(f"## Page {render.page_num}\n\n{text}".strip())
+            structured_pages.append(
+                {
+                    "page_number": render.page_num,
+                    "width": render.width,
+                    "height": render.height,
+                    "blocks": [{"text": text}],
+                }
+            )
+
         markdown = "\n\n---\n\n".join(pages_md)
         structured = normalize_structured(
             {"provider": "vision", "model": self._model, "pages": structured_pages},
@@ -141,7 +168,7 @@ class VisionOCRDigitizer:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}},
+                            {"type": "image_url", "image_url": {"url": data_url, "detail": self._image_detail}},
                             {"type": "text", "text": DOCUMENT_OCR_PROMPT},
                         ],
                     }
@@ -150,14 +177,13 @@ class VisionOCRDigitizer:
                 "max_tokens": 4096,
             }
             try:
-                with httpx.Client(timeout=self._timeout) as client:
-                    resp = client.post(
-                        f"{self._base}/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                        json=payload,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
+                resp = self._client.post(
+                    f"{self._base}/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
                 self._model = model
                 usage = data.get("usage") or {}
                 if self._cost:

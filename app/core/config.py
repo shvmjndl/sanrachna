@@ -35,10 +35,17 @@ class Settings(BaseSettings):
     vision_ocr_timeout_sec: int = 120
     vision_ocr_max_pages: int = 20
     vision_ocr_render_scale: float = 2.0
+    vision_ocr_image_detail: str = "high"
     tesseract_ocr_enabled: bool = True
     tesseract_ocr_lang: str = "eng"
     tesseract_ocr_max_pages: int = 50
     tesseract_ocr_render_scale: float = 2.0
+    vision_ocr_concurrency: int = 5
+    tesseract_ocr_concurrency: int = 4
+    entity_extraction_concurrency: int = 1
+    embed_batch_concurrency: int = 2
+    image_caption_concurrency: int = 1
+    ingest_cost_log_buffer: bool = True
     auto_translate_queries: bool = True
 
     litellm_base_url: str = "http://localhost:4000"

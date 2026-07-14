@@ -144,28 +144,34 @@ async def caption_images(
     context: str,
     job_id: str | None = None,
     document_id: str | None = None,
+    *,
+    concurrency: int = 4,
 ) -> list[ImageAsset]:
-    enriched: list[ImageAsset] = []
-    for img in images:
+    import asyncio
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def caption_one(img: ImageAsset) -> ImageAsset:
         if img.caption:
-            enriched.append(img)
-            continue
+            return img
         ocr = img.ocr_text or ""
         prompt = f"""Generate a concise caption for this document image.
 OCR text: {ocr}
 Surrounding context: {context[:500]}
 Return only the caption text."""
-        try:
-            caption, _ = await llm.chat(
-                messages=[{"role": "user", "content": prompt}],
-                operation="image_captioning",
-                job_id=job_id,
-                document_id=document_id,
-            )
-            enriched.append(img.model_copy(update={"caption": caption.strip()}))
-        except Exception:
-            enriched.append(img)
-    return enriched
+        async with sem:
+            try:
+                caption, _ = await llm.chat(
+                    messages=[{"role": "user", "content": prompt}],
+                    operation="image_captioning",
+                    job_id=job_id,
+                    document_id=document_id,
+                )
+                return img.model_copy(update={"caption": caption.strip()})
+            except Exception:
+                return img
+
+    return list(await asyncio.gather(*[caption_one(img) for img in images]))
 
 
 def extract_image_refs(markdown: str, structured: dict | None = None) -> list[ImageAsset]:

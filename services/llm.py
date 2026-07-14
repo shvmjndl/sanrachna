@@ -127,17 +127,32 @@ class LLMService:
         job_id: str | None = None,
         document_id: str | None = None,
         batch_size: int = 50,
+        batch_concurrency: int = 2,
     ) -> tuple[list[list[float]], dict]:
+        if not texts:
+            return [], {"input_tokens": 0}
+
+        import asyncio
+
+        model = self._settings.litellm_embedding_model
+        batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+        sem = asyncio.Semaphore(max(1, batch_concurrency))
+
+        async def embed_one(batch: list[str], offset: int) -> tuple[int, list[list[float]], int]:
+            async with sem:
+                response = await self._client.embeddings.create(model=model, input=batch)
+                tokens = response.usage.prompt_tokens if response.usage else 0
+                return offset, [d.embedding for d in response.data], tokens
+
+        tasks = [embed_one(batch, i * batch_size) for i, batch in enumerate(batches)]
+        results = await asyncio.gather(*tasks)
+        results.sort(key=lambda x: x[0])
+
         all_embeddings: list[list[float]] = []
         total_tokens = 0
-        model = self._settings.litellm_embedding_model
-
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            response = await self._client.embeddings.create(model=model, input=batch)
-            all_embeddings.extend([d.embedding for d in response.data])
-            if response.usage:
-                total_tokens += response.usage.prompt_tokens
+        for _, vectors, tokens in results:
+            all_embeddings.extend(vectors)
+            total_tokens += tokens
 
         if self._cost:
             self._cost.log_litellm(

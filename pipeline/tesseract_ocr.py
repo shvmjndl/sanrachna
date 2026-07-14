@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import fitz
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from pipeline.page_parallel import map_parallel
 from pipeline.provenance import normalize_structured
 
 log = get_logger(__name__)
+
+
+@dataclass
+class _PageRender:
+    page_num: int
+    img_path: Path
+    width: float
+    height: float
 
 
 class TesseractOCRDigitizer:
@@ -21,6 +31,7 @@ class TesseractOCRDigitizer:
         self._max_pages = settings.tesseract_ocr_max_pages
         self._scale = settings.tesseract_ocr_render_scale
         self._lang = settings.tesseract_ocr_lang
+        self._concurrency = settings.tesseract_ocr_concurrency
 
     def available(self) -> bool:
         if not self._settings.tesseract_ocr_enabled:
@@ -59,29 +70,40 @@ class TesseractOCRDigitizer:
         if page_count > limit:
             log.warning("tesseract_page_limit", total=page_count, limit=limit)
 
-        pages_md: list[str] = []
-        structured_pages: list[dict] = []
-
         with tempfile.TemporaryDirectory(prefix="sanrachna_tesseract_") as tmp:
             tmp_path = Path(tmp)
+            renders: list[_PageRender] = []
             for i in range(limit):
                 page_num = i + 1
                 pix = doc[i].get_pixmap(matrix=fitz.Matrix(self._scale, self._scale))
                 img_path = tmp_path / f"page_{page_num:04d}.png"
                 pix.save(str(img_path))
-                text = pytesseract.image_to_string(str(img_path), lang=self._lang).strip()
-                pages_md.append(f"## Page {page_num}\n\n{text}".strip())
-                structured_pages.append(
-                    {
-                        "page_number": page_num,
-                        "width": float(pix.width),
-                        "height": float(pix.height),
-                        "blocks": [{"text": text}],
-                    }
+                renders.append(
+                    _PageRender(page_num=page_num, img_path=img_path, width=float(pix.width), height=float(pix.height))
                 )
-                log.info("tesseract_page_done", page=page_num, chars=len(text))
+            doc.close()
 
-        doc.close()
+            def ocr_page(render: _PageRender) -> tuple[int, str]:
+                text = pytesseract.image_to_string(str(render.img_path), lang=self._lang).strip()
+                log.info("tesseract_page_done", page=render.page_num, chars=len(text))
+                return render.page_num, text
+
+            ocr_by_page = dict(map_parallel(renders, ocr_page, max_workers=self._concurrency))
+
+        pages_md: list[str] = []
+        structured_pages: list[dict] = []
+        for render in renders:
+            text = ocr_by_page[render.page_num]
+            pages_md.append(f"## Page {render.page_num}\n\n{text}".strip())
+            structured_pages.append(
+                {
+                    "page_number": render.page_num,
+                    "width": render.width,
+                    "height": render.height,
+                    "blocks": [{"text": text}],
+                }
+            )
+
         markdown = "\n\n---\n\n".join(pages_md)
         structured = normalize_structured(
             {"provider": "tesseract", "pages": structured_pages},

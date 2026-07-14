@@ -65,7 +65,11 @@ def process_ingest_job(self, job_id: str) -> dict:
 
 
 async def _process_job(job: IngestJob, session) -> dict:
-    cost_tracker = CostTracker(SyncSessionLocal, log)
+    cost_tracker = CostTracker(
+        SyncSessionLocal,
+        log,
+        buffer_writes=settings.ingest_cost_log_buffer,
+    )
     orchestrator = PipelineOrchestrator(settings, cost_tracker, SyncSessionLocal)
 
     try:
