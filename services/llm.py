@@ -150,3 +150,6 @@ class LLMService:
             )
 
         return all_embeddings, {"input_tokens": total_tokens}
+
+    async def aclose(self) -> None:
+        await self._client.close()

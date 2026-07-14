@@ -10,7 +10,16 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.db.models import Document, IngestJob
 from app.db.session import async_session
-from app.schemas.knowledge import IngestResponse, JobStatus, JobStatusResponse
+from app.schemas.knowledge import (
+    IngestJobListResponse,
+    IngestJobSummary,
+    IngestResponse,
+    JobCancelAllResponse,
+    JobCancelResponse,
+    JobStatus,
+    JobStatusResponse,
+)
+from services.job_control import cancel_active_jobs, cancel_job_record
 from worker.tasks import process_ingest_job
 
 router = APIRouter()
@@ -70,6 +79,56 @@ async def ingest_file(
         status=JobStatus.PENDING,
         message="Document queued for processing",
     )
+
+
+@router.get("/jobs", response_model=IngestJobListResponse)
+async def list_jobs(
+    limit: int = 50,
+    status: str | None = None,
+):
+    async with async_session() as session:
+        query = select(IngestJob).order_by(IngestJob.created_at.desc()).limit(min(limit, 200))
+        if status:
+            query = query.where(IngestJob.status == status)
+        result = await session.execute(query)
+        jobs = result.scalars().all()
+
+    summaries = [
+        IngestJobSummary(
+            job_id=str(j.id),
+            status=JobStatus(j.status),
+            filename=j.filename,
+            progress=j.progress,
+            documents_total=j.documents_total,
+            documents_processed=j.documents_processed,
+            error=j.error,
+            corpus_id=j.corpus_id,
+            created_at=j.created_at,
+        )
+        for j in jobs
+    ]
+    active = sum(
+        1 for j in summaries if j.status in (JobStatus.PENDING, JobStatus.PROCESSING)
+    )
+    return IngestJobListResponse(jobs=summaries, total=len(summaries), active_count=active)
+
+
+@router.post("/jobs/cancel-active", response_model=JobCancelAllResponse)
+async def cancel_active():
+    from app.db.init_db import SyncSessionLocal
+
+    with SyncSessionLocal() as session:
+        result = cancel_active_jobs(session)
+    return JobCancelAllResponse(**result)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=JobCancelResponse)
+async def cancel_job(job_id: str):
+    from app.db.init_db import SyncSessionLocal
+
+    with SyncSessionLocal() as session:
+        result = cancel_job_record(session, job_id)
+    return JobCancelResponse(**result)
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)

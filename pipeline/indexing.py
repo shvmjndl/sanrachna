@@ -240,6 +240,9 @@ class HybridIndexer:
         )
         return embeddings
 
+    async def aclose(self) -> None:
+        await self._llm.aclose()
+
     def delete_document(self, document_id: str) -> int:
         from qdrant_client.models import Filter, FilterSelector, FieldCondition, MatchValue
 

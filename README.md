@@ -10,7 +10,7 @@ Unlike parsing-only services (Unstructured, MinerU, Nanonets, LlamaParse), Sanra
 - Knowledge graph + multi-hop traversal across entities
 - Schema-on-read extraction with built-in templates
 - Cross-document compare, contradiction detection, and document families
-- Pluggable digitizers (Local / Sarvam / MinerU) with content-aware auto-routing
+- Pluggable digitizers (Local / Sarvam / MinerU / Vision / Tesseract) with content-aware auto-routing and fallback chains
 - Agent with 13 tools, SSE streaming, MCP bridge, and optional LangChain integration
 
 ---
@@ -41,7 +41,7 @@ Upload (PDF, DOCX, ZIP, image, EML, …)
         │
         ▼
 ┌───────────────────┐     Celery worker
-│  POST /v1/ingest  │ ──► Digitize (Local | Sarvam | MinerU auto-routing)
+│  POST /v1/ingest  │ ──► Digitize (Local | Sarvam | MinerU | Vision | Tesseract — auto-routing + fallback)
 └───────────────────┘     Chunk (parent-child) + tables + entities + graph
         │                 Embed + index (Qdrant + Postgres BM25)
         ▼
@@ -75,18 +75,42 @@ Query → [optional Sarvam translate] → Dense (Qdrant) + BM25 (Postgres tsvect
 
 ### Digitizer routing (`DIGITIZATION_PROVIDER=auto`)
 
-Sanrachna probes each PDF (text density, Indic script ratio, page count) and picks the best backend. Failed backends fall through automatically.
+Sanrachna probes each PDF (text density, Indic script ratio, page count) and picks the best primary backend. If the chosen backend returns empty or placeholder text, it **falls through** the full chain automatically:
+
+**primary → MinerU → Sarvam → Vision (LiteLLM) → Tesseract → Local**
 
 | Signal | Routed to |
 |--------|-----------|
 | Text-based PDF (high density) | **Local** (PyMuPDF + bbox) |
-| Low text density / scanned layout | **MinerU** (if enabled) → Sarvam → Local |
-| Indic script detected | **Sarvam** OCR |
+| Low text density / scanned layout | **MinerU** → Sarvam → **Vision** → Tesseract → Local |
+| Images (PNG/JPG) | Sarvam → **Vision** → Tesseract → Local |
+| Indic script detected | **Sarvam** (or Vision / Tesseract if no Sarvam key) |
 | Long complex PDF (15+ pages, moderate density) | **MinerU** (if enabled) |
-| Images (PNG/JPG) | **Sarvam** OCR (or Local without key) |
 | DOCX, TXT, EML, etc. | **Local** converter |
 
-Set `DIGITIZATION_PROVIDER=local|sarvam|mineru` to force a single backend. MinerU requires the CLI installed and `MINERU_ENABLED=true`.
+Set `DIGITIZATION_PROVIDER=local|sarvam|mineru|vision` to force a primary backend; unusable output still triggers fallback when other backends are configured.
+
+**Vision OCR** renders each PDF page and sends it to a VLM through LiteLLM. Default model is **`gemini-3.5-flash`** (recommended for scanned docs). Configure via `VISION_OCR_MODEL` and comma-separated `VISION_OCR_FALLBACK_MODELS`. Models must be listed in `litellm_config.yaml` (Gemini and OpenAI entries are included out of the box).
+
+**Tesseract OCR** is a local, no-API fallback (installed in the worker Docker image). Enable with `TESSERACT_OCR_ENABLED=true`.
+
+> **Note:** Some OpenAI project keys allow text chat but **not** vision (`missing_scope` on image requests). Use **`GEMINI_API_KEY`** for scanned PDF OCR while keeping OpenAI for embeddings and the agent.
+
+### Scanned PDF quick setup (Gemini vision)
+
+```bash
+cp .env.example .env
+
+OPENAI_API_KEY=sk-...              # embeddings, NER, agent (text)
+GEMINI_API_KEY=...                 # vision OCR for scanned PDFs
+DIGITIZATION_PROVIDER=auto
+VISION_OCR_MODEL=gemini-3.5-flash
+VISION_OCR_FALLBACK_MODELS=gemini-2.5-flash
+
+docker compose up -d --build
+```
+
+An 18-page scanned PDF takes roughly 5–10 minutes (one LiteLLM call per page).
 
 ---
 
@@ -94,7 +118,7 @@ Set `DIGITIZATION_PROVIDER=local|sarvam|mineru` to force a single backend. Miner
 
 ### English-only (no Sarvam)
 
-You only need **OpenAI** for embeddings, NER, graph, and the agent.
+You need **OpenAI** for embeddings, NER, graph, and the agent. For **scanned PDFs**, also set **`GEMINI_API_KEY`** (see [Scanned PDF quick setup](#scanned-pdf-quick-setup-gemini-vision)).
 
 ```bash
 cp .env.example .env
@@ -104,8 +128,10 @@ Set in `.env`:
 
 ```bash
 OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=                    # required for scanned/image PDF OCR
 SARVAM_API_KEY=                    # leave empty
-DIGITIZATION_PROVIDER=local        # PyMuPDF for text PDFs
+DIGITIZATION_PROVIDER=auto         # auto-routes scanned PDFs to Gemini vision
+VISION_OCR_MODEL=gemini-3.5-flash
 COHERE_API_KEY=                    # optional — LLM rerank fallback works without it
 ENABLE_COHERE_RERANK=false
 ```
@@ -151,8 +177,8 @@ curl -X POST http://localhost:8000/v1/query \
 
 ```bash
 cp .env.example .env
-# Set SARVAM_API_KEY and OPENAI_API_KEY
-DIGITIZATION_PROVIDER=auto   # smart-routes: local / Sarvam / MinerU
+# Set SARVAM_API_KEY, OPENAI_API_KEY, and optionally GEMINI_API_KEY for vision OCR fallback
+DIGITIZATION_PROVIDER=auto   # smart-routes: local / Sarvam / MinerU / Vision / Tesseract
 MINERU_ENABLED=false         # set true if mineru CLI is installed
 AUTO_TRANSLATE_QUERIES=true  # Hindi/Tamil/etc. queries auto-translated for search
 
@@ -181,13 +207,24 @@ Try a Hindi query after ingesting an Indic document — the agent translates, se
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | — | Required for embeddings, NER, agent |
+| `OPENAI_API_KEY` | — | Embeddings, NER, agent (text models via LiteLLM) |
+| `GEMINI_API_KEY` | — | Vision OCR for scanned PDFs (`gemini-3.5-flash` via LiteLLM) |
 | `SARVAM_API_KEY` | — | Indic OCR, LID, translation |
-| `DIGITIZATION_PROVIDER` | `auto` | `auto` \| `local` \| `sarvam` \| `mineru` |
+| `DIGITIZATION_PROVIDER` | `auto` | `auto` \| `local` \| `sarvam` \| `mineru` \| `vision` |
 | `MINERU_ENABLED` | `false` | Enable MinerU CLI for complex/scanned PDFs |
 | `MINERU_BIN` | `mineru` | MinerU executable path |
 | `MINERU_BACKEND` | `pipeline` | MinerU backend mode |
 | `MINERU_TIMEOUT_SEC` | `600` | MinerU subprocess timeout (seconds) |
+| `VISION_OCR_ENABLED` | `true` | Vision LLM OCR via LiteLLM when local fails |
+| `VISION_OCR_MODEL` | `gemini-3.5-flash` | Primary VLM for page OCR |
+| `VISION_OCR_FALLBACK_MODELS` | `gemini-2.5-flash,gpt-4o-mini` | Comma-separated VLM fallbacks per page |
+| `VISION_OCR_MAX_PAGES` | `20` | Max PDF pages to send to vision OCR |
+| `VISION_OCR_RENDER_SCALE` | `2.0` | PDF page render scale for vision OCR |
+| `VISION_OCR_TIMEOUT_SEC` | `120` | Per-page vision OCR HTTP timeout |
+| `TESSERACT_OCR_ENABLED` | `true` | Local Tesseract fallback (worker image includes `tesseract-ocr`) |
+| `TESSERACT_OCR_LANG` | `eng` | Tesseract language pack(s) |
+| `TESSERACT_OCR_MAX_PAGES` | `50` | Max PDF pages for Tesseract OCR |
+| `TESSERACT_OCR_RENDER_SCALE` | `2.0` | PDF page render scale for Tesseract |
 | `AUTO_TRANSLATE_QUERIES` | `true` | Auto-translate non-English queries before search |
 | `COHERE_API_KEY` | — | Optional reranking |
 | `ENABLE_COHERE_RERANK` | `false` | Enable Cohere rerank-v3.5 |
@@ -201,7 +238,7 @@ Try a Hindi query after ingesting an Indic document — the agent translates, se
 |-----------|----------|
 | TXT, MD, DOCX, PPTX, EML | Local converter |
 | Text-based PDF | PyMuPDF (local) + bbox capture |
-| Complex/scanned PDF | MinerU CLI (optional, `MINERU_ENABLED=true`) |
+| Scanned / image PDF | **Gemini vision OCR** (via LiteLLM), MinerU CLI, or **Tesseract** |
 | Embeddings, NER, graph, agent | OpenAI via LiteLLM |
 | Search rerank | Cohere (optional) or LLM fallback |
 
@@ -209,12 +246,14 @@ Try a Hindi query after ingesting an Indic document — the agent translates, se
 
 | Component | Why |
 |-----------|-----|
-| Scanned PDF / images | OCR |
-| Hindi, Tamil, Telugu, etc. | Indic script OCR |
-| Language auto-detect (LID) | Sarvam LID API |
+| Indic scanned PDF / images | Best-quality Indic script OCR |
+| Hindi, Tamil, Telugu, etc. | Indic script OCR + query translation |
+| Language detection (LID) | Sarvam LID API |
 | `translate_text` agent tool | Sarvam Translate |
 | `POST /v1/translate` | Sarvam Translate |
 | Multilingual query preprocessing | Sarvam LID + Translate (`AUTO_TRANSLATE_QUERIES`) |
+
+Without Sarvam, scanned Indic documents can still be processed via Gemini vision or Tesseract, but Sarvam generally gives better results for Indic layouts.
 
 ---
 
@@ -1222,8 +1261,8 @@ conflicts = client.contradictions(document_id_a="doc_v1", document_id_b="doc_v2"
 
 | Format | Extensions | Digitizer (auto mode) |
 |--------|------------|----------------------|
-| PDF | `.pdf` | Local (text) → MinerU (scanned/complex) → Sarvam (Indic/low density) |
-| Images | `.png`, `.jpg`, `.jpeg` | Sarvam OCR (Local fallback) |
+| PDF | `.pdf` | Local (text) → MinerU → Sarvam → **Gemini vision** → Tesseract |
+| Images | `.png`, `.jpg`, `.jpeg` | Sarvam → **Gemini vision** → Tesseract |
 | Office | `.docx`, `.pptx` | Local converter |
 | Email | `.eml` | Local converter |
 | Text | `.txt`, `.md`, `.csv` | Direct |
@@ -1238,6 +1277,19 @@ MINERU_ENABLED=true
 MINERU_BIN=mineru
 ```
 
+**Gemini vision OCR** (recommended for scanned PDFs without Sarvam):
+
+```bash
+# In .env:
+GEMINI_API_KEY=...
+VISION_OCR_MODEL=gemini-3.5-flash
+VISION_OCR_FALLBACK_MODELS=gemini-2.5-flash
+```
+
+Models are pre-configured in `litellm_config.yaml`. LiteLLM must receive `GEMINI_API_KEY` (set automatically via `docker compose`).
+
+**Tesseract** runs inside the worker container with no API key. Disable with `TESSERACT_OCR_ENABLED=false` if you only want cloud OCR.
+
 ---
 
 ## Project Structure
@@ -1247,9 +1299,12 @@ sanrachna/
 ├── app/                  # FastAPI app, routes, schemas, DB models
 │   └── api/routes/       # ingest, search, query, extract, compare, graph, …
 ├── pipeline/             # Digitize, chunk, enrich, index, extract
-│   ├── digitizer_router.py  # Content-aware local/sarvam/mineru routing
-│   ├── mineru.py         # MinerU CLI backend
-│   └── table_merge.py    # Cross-page table merge
+│   ├── digitizer_router.py  # Content-aware routing (local/sarvam/mineru/vision/tesseract)
+│   ├── digitizer_utils.py   # Fallback chain + output quality checks
+│   ├── vision_ocr.py        # VLM page OCR via LiteLLM (Gemini, OpenAI, …)
+│   ├── tesseract_ocr.py     # Local Tesseract fallback
+│   ├── mineru.py            # MinerU CLI backend
+│   └── table_merge.py       # Cross-page table merge
 ├── services/             # Agent, graph, confidence, compare, webhooks, …
 ├── worker/               # Celery ingest tasks + versioning + webhooks
 ├── integrations/         # LangChain retriever + tools (optional)
@@ -1268,7 +1323,7 @@ sanrachna/
 ## Re-ingest & upgrades
 
 - **Incremental re-ingest**: pass `supersedes_id` or upload the same file with `incremental=true` (default) to bump `version` and refresh indexes.
-- **New capabilities on old docs**: bbox provenance, quality scores, document family metadata, and MinerU routing improvements are computed at ingest time — re-ingest to pick them up.
+- **New capabilities on old docs**: bbox provenance, quality scores, document family metadata, Gemini vision OCR, Tesseract fallback, and digitizer routing improvements are computed at ingest time — re-ingest to pick them up.
 - **Webhook notifications**: register `POST /v1/webhooks` to get `ingest.completed` callbacks instead of polling `GET /v1/jobs/{job_id}`.
 
 ---

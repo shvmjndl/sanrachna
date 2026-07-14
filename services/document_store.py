@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 from sqlalchemy import delete, select
 
 from app.core.config import Settings
 from app.db.models import Document
 from app.db.session import async_session
-from pipeline.indexing import HybridIndexer
 from services.bm25 import BM25Indexer
 from services.entity_resolution import EntityResolver
-from services.llm import LLMService
 
 
 class DocumentStore:
@@ -21,12 +21,8 @@ class DocumentStore:
         self._sync_session_factory = sync_session_factory
         self._bm25 = BM25Indexer(sync_session_factory)
         self._entities = EntityResolver(sync_session_factory)
-        self._indexer = HybridIndexer(
-            settings,
-            LLMService(settings, None),
-            sync_session_factory,
-            None,
-        )
+        self._qdrant = QdrantClient(url=settings.qdrant_url)
+        self._collection = settings.qdrant_collection
 
     async def delete_document(self, document_id: str) -> dict:
         async with async_session() as session:
@@ -42,7 +38,7 @@ class DocumentStore:
             await session.commit()
 
         bm25_deleted = self._bm25.delete_document(document_id)
-        self._indexer.delete_document(document_id)
+        self._delete_vectors(document_id)
         entities_updated = self._entities.remove_document(document_id)
         file_deleted = self._delete_file(file_path)
 
@@ -54,6 +50,21 @@ class DocumentStore:
             "canonical_entities_updated": entities_updated,
             "file_deleted": file_deleted,
         }
+
+    def _delete_vectors(self, document_id: str) -> None:
+        self._qdrant.delete(
+            collection_name=self._collection,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=document_id),
+                        )
+                    ]
+                )
+            ),
+        )
 
     def _delete_file(self, file_path: str | None) -> bool:
         if not file_path:

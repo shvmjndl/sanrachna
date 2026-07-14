@@ -184,6 +184,37 @@ class JobStatusResponse(BaseModel):
     result: CorpusSummary | None = None
 
 
+class IngestJobSummary(BaseModel):
+    job_id: str
+    status: JobStatus
+    filename: str
+    progress: float = 0.0
+    documents_total: int = 0
+    documents_processed: int = 0
+    error: str | None = None
+    corpus_id: str | None = None
+    created_at: datetime | None = None
+
+
+class IngestJobListResponse(BaseModel):
+    jobs: list[IngestJobSummary]
+    total: int
+    active_count: int
+
+
+class JobCancelResponse(BaseModel):
+    job_id: str
+    cancelled: bool
+    message: str
+    removed_from_queue: int = 0
+
+
+class JobCancelAllResponse(BaseModel):
+    cancelled_count: int
+    job_ids: list[str] = Field(default_factory=list)
+    removed_from_queue: int = 0
+
+
 class SearchRequest(BaseModel):
     query: str
     top_k: int = 10

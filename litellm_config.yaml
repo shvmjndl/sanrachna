@@ -9,6 +9,16 @@ model_list:
       model: openai/gpt-4o
       api_key: os.environ/OPENAI_API_KEY
 
+  - model_name: gemini-3.5-flash
+    litellm_params:
+      model: gemini/gemini-3.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: gemini-2.5-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
   - model_name: text-embedding-3-small
     litellm_params:
       model: openai/text-embedding-3-small

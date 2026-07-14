@@ -22,6 +22,7 @@ from pipeline.chunking import chunk_markdown, get_indexable_chunks
 from pipeline.classifier import classify_knowledge_object
 from pipeline.converters import convert_to_markdown
 from pipeline.digitizer_router import choose_digitizer, mineru_cli_available
+from pipeline.digitizer_utils import build_fallback_chain, is_usable_markdown
 from pipeline.enrichment import caption_images, extract_image_refs, extract_tables, tables_to_search_chunks
 from pipeline.entities import extract_entities
 from pipeline.graph import extract_relationships
@@ -32,6 +33,8 @@ from pipeline.quality import enrich_knowledge_object
 from pipeline.router import classify_file, detect_mime
 from pipeline.sarvam import SarvamClient
 from pipeline.table_merge import merge_cross_page_tables
+from pipeline.tesseract_ocr import TesseractOCRDigitizer
+from pipeline.vision_ocr import VisionOCRDigitizer
 from services.entity_resolution import EntityResolver
 from services.lid import LIDClient
 from services.llm import LLMService
@@ -51,6 +54,8 @@ class PipelineOrchestrator:
         self._sarvam = SarvamClient(settings) if settings.sarvam_api_key else None
         self._local = LocalDigitizer()
         self._mineru = MinerUDigitizer(settings)
+        self._vision = VisionOCRDigitizer(settings, cost_tracker)
+        self._tesseract = TesseractOCRDigitizer(settings)
         self._llm = LLMService(settings, cost_tracker)
         self._indexer = HybridIndexer(settings, self._llm, session_factory, cost_tracker)
         self._entity_resolver = EntityResolver(session_factory) if session_factory else None
@@ -75,7 +80,9 @@ class PipelineOrchestrator:
             file_path,
             provider_setting=self._settings.digitization_provider,
             sarvam_available=self._sarvam is not None,
-            mineru_available=self._mineru.available() or mineru_cli_available(self._settings.mineru_bin),
+            mineru_available=self._mineru_available(),
+            vision_available=self._vision.available(),
+            tesseract_available=self._tesseract.available(),
             language=language,
         )
 
@@ -96,8 +103,8 @@ class PipelineOrchestrator:
         digitizer_used = choice.provider
 
         if file_type == "sarvam":
-            markdown, structured, sarvam_job_ids, pages, detected_languages = self._digitize_pdf_image(
-                file_path, language, choice, options, job_id, document_id
+            markdown, structured, sarvam_job_ids, pages, detected_languages, digitizer_used = (
+                self._digitize_pdf_image(file_path, language, choice, options, job_id, document_id)
             )
         elif file_type == "convert":
             digitizer_used = "local"
@@ -207,6 +214,12 @@ class PipelineOrchestrator:
         ko.embeddings = embeddings_info
         return ko
 
+    async def aclose(self) -> None:
+        await self._indexer.aclose()
+
+    def _mineru_available(self) -> bool:
+        return self._mineru.available() or mineru_cli_available(self._settings.mineru_bin)
+
     def _digitize_pdf_image(
         self,
         file_path: Path,
@@ -215,10 +228,9 @@ class PipelineOrchestrator:
         options: dict,
         job_id: str,
         document_id: str,
-    ) -> tuple[str, dict, list[str], int, list[str]]:
+    ) -> tuple[str, dict, list[str], int, list[str], str]:
         detected_languages: list[str] = []
         sarvam_job_ids: list[str] = []
-        provider = choice.provider
 
         if options.get("auto_detect_language", True) and self._lid:
             sample_text = self._sample_file_text(file_path)
@@ -229,38 +241,97 @@ class PipelineOrchestrator:
                 except Exception:
                     pass
 
-        chain = [provider, "sarvam" if self._sarvam else None, "local"]
-        tried: set[str] = set()
-        last_error = None
+        chain = build_fallback_chain(
+            choice.provider,
+            mineru_available=self._mineru_available(),
+            sarvam_available=self._sarvam is not None,
+            vision_available=self._vision.available(),
+            tesseract_available=self._tesseract.available(),
+            include_local=True,
+        )
+        log.info("digitizer_fallback_chain", chain=chain, primary=choice.provider)
 
-        for p in chain:
-            if not p or p in tried:
-                continue
-            tried.add(p)
+        last_error: Exception | None = None
+
+        for provider in chain:
             try:
-                if p == "mineru" and self._mineru.available():
-                    md, structured, pages = self._mineru.process_file(file_path, language)
-                    return md, structured, sarvam_job_ids, pages, detected_languages
-                if p == "sarvam" and self._sarvam:
-                    md, structured, sarvam_job_ids, pages = self._sarvam.process_file(file_path, language)
+                result = self._run_digitizer(
+                    provider,
+                    file_path,
+                    language,
+                    job_id=job_id,
+                    document_id=document_id,
+                )
+                if result is None:
+                    continue
+                md, structured, job_ids, pages = result
+                if not is_usable_markdown(md):
+                    log.warning(
+                        "digitizer_unusable_output",
+                        provider=provider,
+                        chars=len(md.strip()),
+                    )
+                    continue
+                if provider == "sarvam":
                     self._cost.log_sarvam(
                         job_id=job_id,
                         document_id=document_id,
                         pages=pages,
                         cost_per_page=self._settings.sarvam_cost_per_page_inr,
-                        extra={"sarvam_job_ids": sarvam_job_ids},
+                        extra={"sarvam_job_ids": job_ids},
                     )
-                    return md, structured, sarvam_job_ids, pages, detected_languages
-                if p == "local":
-                    md, structured, pages = self._local.process_file(file_path)
-                    if not detected_languages:
-                        detected_languages.append(language or "en-IN")
-                    return md, structured, sarvam_job_ids, pages, detected_languages
+                if not detected_languages:
+                    detected_languages.append(language or "en-IN")
+                return md, structured, job_ids, pages, detected_languages, provider
             except Exception as exc:
                 last_error = exc
-                log.warning("digitizer_fallback", provider=p, error=str(exc))
+                log.warning("digitizer_fallback", provider=provider, error=str(exc))
 
-        raise RuntimeError(f"All digitizers failed: {last_error}")
+        raise RuntimeError(
+            "All digitizers failed for scanned document. "
+            f"Last error: {last_error}. "
+            "Configure SARVAM_API_KEY, enable MINERU_ENABLED, use an OpenAI key with vision scope, "
+            "or rely on built-in Tesseract OCR (TESSERACT_OCR_ENABLED=true)."
+        )
+
+    def _run_digitizer(
+        self,
+        provider: str,
+        file_path: Path,
+        language: str,
+        *,
+        job_id: str,
+        document_id: str,
+    ) -> tuple[str, dict, list[str], int] | None:
+        if provider == "mineru":
+            if not self._mineru_available():
+                return None
+            md, structured, pages = self._mineru.process_file(file_path, language)
+            return md, structured, [], pages
+        if provider == "sarvam":
+            if not self._sarvam:
+                return None
+            md, structured, job_ids, pages = self._sarvam.process_file(file_path, language)
+            return md, structured, job_ids, pages
+        if provider == "vision":
+            if not self._vision.available():
+                return None
+            md, structured, pages = self._vision.process_file(
+                file_path,
+                language,
+                job_id=job_id,
+                document_id=document_id,
+            )
+            return md, structured, [], pages
+        if provider == "tesseract":
+            if not self._tesseract.available():
+                return None
+            md, structured, pages = self._tesseract.process_file(file_path, language)
+            return md, structured, [], pages
+        if provider == "local":
+            md, structured, pages = self._local.process_file(file_path)
+            return md, structured, [], pages
+        return None
 
     def _sample_file_text(self, file_path: Path) -> str:
         if file_path.suffix.lower() in (".txt", ".md", ".csv", ".eml"):

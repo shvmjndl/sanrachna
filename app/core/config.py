@@ -23,12 +23,22 @@ class Settings(BaseSettings):
 
     sarvam_api_key: str = ""
     sarvam_cost_per_page_inr: float = 0.5
-    # auto = smart route local/sarvam/mineru | local | sarvam | mineru
+    # auto = smart route + fallback chain (local/sarvam/mineru/vision)
     digitization_provider: str = "auto"
     mineru_enabled: bool = False
     mineru_bin: str = "mineru"
     mineru_backend: str = "pipeline"
     mineru_timeout_sec: int = 600
+    vision_ocr_enabled: bool = True
+    vision_ocr_model: str = "gemini-3.5-flash"
+    vision_ocr_fallback_models: str = "gemini-2.5-flash,gpt-4o-mini"
+    vision_ocr_timeout_sec: int = 120
+    vision_ocr_max_pages: int = 20
+    vision_ocr_render_scale: float = 2.0
+    tesseract_ocr_enabled: bool = True
+    tesseract_ocr_lang: str = "eng"
+    tesseract_ocr_max_pages: int = 50
+    tesseract_ocr_render_scale: float = 2.0
     auto_translate_queries: bool = True
 
     litellm_base_url: str = "http://localhost:4000"
@@ -49,6 +59,7 @@ class Settings(BaseSettings):
     rerank_model: str = "rerank-v3.5"
     rerank_top_n: int = 20
     cohere_api_key: str = ""
+    gemini_api_key: str = ""
 
 
 @lru_cache

@@ -78,7 +78,7 @@ class LocalDigitizer:
         if not markdown.strip() or all("[No extractable text]" in p for p in pages_md):
             markdown = (
                 f"[PDF {pdf_path.name} has no extractable text — likely a scanned document. "
-                "Set SARVAM_API_KEY for OCR, or upload a text-based PDF.]"
+                "Configure SARVAM_API_KEY, MINERU_ENABLED, or OPENAI_API_KEY (vision OCR via LiteLLM).]"
             )
 
         return markdown, structured, page_count

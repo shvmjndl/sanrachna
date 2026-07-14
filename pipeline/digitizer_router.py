@@ -1,4 +1,4 @@
-"""Content-aware digitizer routing — pick local, Sarvam, or MinerU."""
+"""Content-aware digitizer routing — pick best available backend."""
 
 from __future__ import annotations
 
@@ -40,49 +40,107 @@ def _pdf_probe(file_path: Path) -> tuple[float, float, int, str]:
     return density, indic_ratio, pages, combined[:2000]
 
 
+def _first_ocr_provider(
+    *,
+    mineru_available: bool,
+    sarvam_available: bool,
+    vision_available: bool,
+    tesseract_available: bool = False,
+) -> str | None:
+    if mineru_available:
+        return "mineru"
+    if sarvam_available:
+        return "sarvam"
+    if vision_available:
+        return "vision"
+    if tesseract_available:
+        return "tesseract"
+    return None
+
+
 def choose_digitizer(
     file_path: Path,
     *,
     provider_setting: str = "auto",
     sarvam_available: bool = False,
     mineru_available: bool = False,
+    vision_available: bool = False,
+    tesseract_available: bool = False,
     language: str = "en-IN",
 ) -> DigitizerChoice:
     ext = file_path.suffix.lower()
     setting = provider_setting.lower()
 
-    if setting == "local":
-        return DigitizerChoice("local", "digitization_provider=local")
+    if setting == "vision":
+        return DigitizerChoice(
+            "vision" if vision_available else "local",
+            "digitization_provider=vision" if vision_available else "vision unavailable",
+        )
     if setting == "sarvam":
         return DigitizerChoice("sarvam", "digitization_provider=sarvam")
     if setting == "mineru":
         return DigitizerChoice(
             "mineru" if mineru_available else "local",
-            "digitization_provider=mineru" if mineru_available else "mineru unavailable, fallback local",
+            "digitization_provider=mineru" if mineru_available else "mineru unavailable",
         )
+    if setting == "local":
+        # Still probe — orchestrator will fallback to OCR if local yields nothing
+        if ext == ".pdf":
+            density, indic_ratio, pages, _ = _pdf_probe(file_path)
+            if density < 0.08:
+                ocr = _first_ocr_provider(
+                    mineru_available=mineru_available,
+                    sarvam_available=sarvam_available,
+                    vision_available=vision_available,
+                    tesseract_available=tesseract_available,
+                )
+                if ocr:
+                    return DigitizerChoice(
+                        ocr,
+                        f"scanned PDF — prefer {ocr} despite digitization_provider=local",
+                        density,
+                        indic_ratio,
+                        pages,
+                    )
+        return DigitizerChoice("local", "digitization_provider=local")
 
     if ext in {".png", ".jpg", ".jpeg"}:
-        if sarvam_available:
-            return DigitizerChoice("sarvam", "image requires OCR")
-        return DigitizerChoice("local", "image without sarvam")
+        ocr = _first_ocr_provider(
+            mineru_available=False,
+            sarvam_available=sarvam_available,
+            vision_available=vision_available,
+            tesseract_available=tesseract_available,
+        )
+        if ocr:
+            return DigitizerChoice(ocr, f"image OCR via {ocr}")
+        return DigitizerChoice("local", "image without OCR backend")
 
     if ext != ".pdf":
         return DigitizerChoice("local", "non-pdf convertible format")
 
     density, indic_ratio, pages, _ = _pdf_probe(file_path)
 
-    if density < 0.08 and mineru_available:
-        return DigitizerChoice(
-            "mineru",
-            "low text density — likely scanned/complex layout",
-            density,
-            indic_ratio,
-            pages,
+    if density < 0.08:
+        ocr = _first_ocr_provider(
+            mineru_available=mineru_available,
+            sarvam_available=sarvam_available,
+            vision_available=vision_available,
+            tesseract_available=tesseract_available,
         )
-    if density < 0.08 and sarvam_available:
-        return DigitizerChoice("sarvam", "low text density — scanned PDF", density, indic_ratio, pages)
+        if ocr:
+            return DigitizerChoice(
+                ocr,
+                f"low text density — {ocr}",
+                density,
+                indic_ratio,
+                pages,
+            )
+
     if indic_ratio > 0.05 and sarvam_available:
         return DigitizerChoice("sarvam", "Indic script detected", density, indic_ratio, pages)
+    if indic_ratio > 0.05 and vision_available:
+        return DigitizerChoice("vision", "Indic script — vision OCR", density, indic_ratio, pages)
+
     if pages > 15 and mineru_available and density < 0.35:
         return DigitizerChoice("mineru", "long complex PDF", density, indic_ratio, pages)
     if mineru_available and density < 0.2:
