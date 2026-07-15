@@ -82,6 +82,44 @@ class HybridIndexer:
                 vectors_config=VectorParams(size=dimensions, distance=Distance.COSINE),
             )
 
+    def _build_point(
+        self,
+        chunk: Chunk,
+        vector: list[float],
+        document_id: str,
+        corpus_id: str | None,
+    ) -> PointStruct:
+        text = chunk.text or ""
+        if len(text) > self._settings.qdrant_payload_text_max_chars:
+            text = text[: self._settings.qdrant_payload_text_max_chars]
+
+        parent_text = chunk.parent_text
+        if parent_text and len(parent_text) > self._settings.qdrant_payload_parent_max_chars:
+            parent_text = parent_text[: self._settings.qdrant_payload_parent_max_chars]
+
+        return PointStruct(
+            id=str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk.id)),
+            vector=vector,
+            payload={
+                "chunk_id": chunk.id,
+                "document_id": document_id,
+                "corpus_id": corpus_id,
+                "text": text,
+                "parent_text": parent_text,
+                "page": chunk.page,
+                "section": chunk.section,
+                "token_count": chunk.token_count,
+                "confidence": chunk.confidence,
+                "bbox": chunk.bbox.model_dump() if chunk.bbox else None,
+            },
+        )
+
+    def _upsert_points_batched(self, points: list[PointStruct]) -> None:
+        batch_size = max(1, self._settings.qdrant_upsert_batch_size)
+        for i in range(0, len(points), batch_size):
+            batch = points[i : i + batch_size]
+            self._client.upsert(collection_name=self._collection, points=batch)
+
     async def index_chunks(
         self,
         document_id: str,
@@ -96,43 +134,18 @@ class HybridIndexer:
         if len(embeddings[0]) != 1536:
             self._ensure_collection(len(embeddings[0]))
 
-        points = []
-        for chunk, vector in zip(chunks, embeddings):
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk.id))
-            points.append(
-                PointStruct(
-                    id=point_id,
-                    vector=vector,
-                    payload={
-                        "chunk_id": chunk.id,
-                        "document_id": document_id,
-                        "corpus_id": corpus_id,
-                        "text": chunk.text,
-                        "parent_text": chunk.parent_text,
-                        "page": chunk.page,
-                        "section": chunk.section,
-                        "token_count": chunk.token_count,
-                        "confidence": chunk.confidence,
-                        "bbox": chunk.bbox.model_dump() if chunk.bbox else None,
-                    },
-                )
-            )
+        points = [
+            self._build_point(chunk, vector, document_id, corpus_id)
+            for chunk, vector in zip(chunks, embeddings)
+        ]
 
         if self._bm25:
             await asyncio.gather(
-                asyncio.to_thread(
-                    self._client.upsert,
-                    collection_name=self._collection,
-                    points=points,
-                ),
+                asyncio.to_thread(self._upsert_points_batched, points),
                 asyncio.to_thread(self._bm25.index_chunks, chunks, document_id, corpus_id),
             )
         else:
-            await asyncio.to_thread(
-                self._client.upsert,
-                collection_name=self._collection,
-                points=points,
-            )
+            await asyncio.to_thread(self._upsert_points_batched, points)
 
         return len(points)
 

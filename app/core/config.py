@@ -20,6 +20,9 @@ class Settings(BaseSettings):
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "sanrachna_chunks"
+    qdrant_upsert_batch_size: int = 64
+    qdrant_payload_text_max_chars: int = 4000
+    qdrant_payload_parent_max_chars: int = 512
 
     sarvam_api_key: str = ""
     sarvam_cost_per_page_inr: float = 0.5
